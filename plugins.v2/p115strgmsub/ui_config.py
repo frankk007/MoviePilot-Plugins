@@ -479,8 +479,8 @@ class UIConfig:
                                 'text': '清空历史记录',
                                 'events': {
                                     'click': {
-                                        'api': '/plugin/P115StrgmSub/clear_history',
-                                        'method': 'post'
+                                        'api': f'/plugin/P115StrgmSub/clear_history?apikey={settings.API_TOKEN}',
+                                        'method': 'post',
                                     }
                                 }
                             }]
