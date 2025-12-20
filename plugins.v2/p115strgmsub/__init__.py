@@ -158,8 +158,18 @@ class P115StrgmSub(_PluginBase):
             self._p115_manager = P115ClientManager(cookies=self._cookies)
 
         # 初始化 Nullbr 客户端
-        if self._nullbr_enabled and self._nullbr_app_id and self._nullbr_api_key:
-            self._nullbr_client = NullbrClient(app_id=self._nullbr_app_id, api_key=self._nullbr_api_key)
+        if self._nullbr_enabled:
+            if not self._nullbr_app_id or not self._nullbr_api_key:
+                missing = []
+                if not self._nullbr_app_id:
+                    missing.append("APP ID")
+                if not self._nullbr_api_key:
+                    missing.append("API Key")
+                logger.warning(f"⚠️ Nullbr 已启用但缺少必要配置：{', '.join(missing)}，将无法使用 Nullbr 查询功能")
+                self._nullbr_client = None
+            else:
+                self._nullbr_client = NullbrClient(app_id=self._nullbr_app_id, api_key=self._nullbr_api_key)
+                logger.info("✓ Nullbr 客户端初始化成功")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -428,21 +438,27 @@ class P115StrgmSub(_PluginBase):
         :return: 115网盘资源列表
         """
         p115_results = []
-        
+
         # 1. 优先使用 NullBR
-        if self._nullbr_priority and self._nullbr_enabled and self._nullbr_client and mediainfo.tmdb_id:
-            if media_type == MediaType.MOVIE:
-                logger.info(f"使用 Nullbr 查询电影资源: {mediainfo.title} (TMDB ID: {mediainfo.tmdb_id})")
-                nullbr_resources = self._nullbr_client.get_movie_resources(mediainfo.tmdb_id)
-            else:  # MediaType.TV
-                logger.info(f"使用 Nullbr 查询电视剧资源: {mediainfo.title} S{season} (TMDB ID: {mediainfo.tmdb_id})")
-                nullbr_resources = self._nullbr_client.get_tv_resources(mediainfo.tmdb_id, season)
-            
-            if nullbr_resources:
-                p115_results = self._convert_nullbr_to_pansou_format(nullbr_resources)
-                logger.info(f"Nullbr 找到 {len(p115_results)} 个资源")
+        if self._nullbr_priority and self._nullbr_enabled:
+            # 检查客户端是否已初始化
+            if not self._nullbr_client:
+                logger.warning(f"⚠️ Nullbr 已启用但未初始化（缺少 APP ID 或 API Key），跳过 Nullbr 查询")
+            elif not mediainfo.tmdb_id:
+                logger.warning(f"⚠️ {mediainfo.title} 缺少 TMDB ID，无法使用 Nullbr 查询")
             else:
-                logger.info(f"Nullbr 优先模式未找到资源，将回退到 PanSou 搜索")
+                if media_type == MediaType.MOVIE:
+                    logger.info(f"使用 Nullbr 查询电影资源: {mediainfo.title} (TMDB ID: {mediainfo.tmdb_id})")
+                    nullbr_resources = self._nullbr_client.get_movie_resources(mediainfo.tmdb_id)
+                else:  # MediaType.TV
+                    logger.info(f"使用 Nullbr 查询电视剧资源: {mediainfo.title} S{season} (TMDB ID: {mediainfo.tmdb_id})")
+                    nullbr_resources = self._nullbr_client.get_tv_resources(mediainfo.tmdb_id, season)
+
+                if nullbr_resources:
+                    p115_results = self._convert_nullbr_to_pansou_format(nullbr_resources)
+                    logger.info(f"Nullbr 找到 {len(p115_results)} 个资源")
+                else:
+                    logger.info(f"Nullbr 优先模式未找到资源，将回退到 PanSou 搜索")
         
         # 2. 如果 NullBR 未找到，使用 PanSou
         if not p115_results and self._pansou_enabled and self._pansou_client:
