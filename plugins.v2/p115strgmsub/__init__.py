@@ -77,7 +77,7 @@ class P115StrgmSub(_PluginBase):
     _only_115: bool = True  # 只搜索115网盘资源
     _exclude_subscribes: List[int] = []  # 排除的订阅ID列表
     _nullbr_enabled: bool = False  # 是否启用 Nullbr 查询
-    _nullbr_app_id: str = "J5LrECLuR"  # Nullbr APP ID
+    _nullbr_app_id: str = ""  # Nullbr APP ID
     _nullbr_api_key: str = ""  # Nullbr API Key
     _nullbr_priority: bool = True  # Nullbr 优先（True: 优先使用 Nullbr，False: 优先使用 PanSou）
     _block_system_subscribe: bool = False  # 是否屏蔽系统订阅
@@ -109,7 +109,7 @@ class P115StrgmSub(_PluginBase):
             self._only_115 = config.get("only_115", True)
             self._exclude_subscribes = config.get("exclude_subscribes", []) or []
             self._nullbr_enabled = config.get("nullbr_enabled", False)
-            self._nullbr_app_id = config.get("nullbr_app_id", "J5LrECLuR")
+            self._nullbr_app_id = config.get("nullbr_app_id", "")
             self._nullbr_api_key = config.get("nullbr_api_key", "")
             self._nullbr_priority = config.get("nullbr_priority", True)
             
