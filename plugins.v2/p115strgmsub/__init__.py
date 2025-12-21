@@ -24,7 +24,7 @@ from app.db.models.site import Site
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import MediaInfo
-from app.schemas.types import EventType, MediaType
+from app.schemas.types import EventType, MediaType, NotificationType
 
 from .pansou import PanSouClient
 from .p115client import P115ClientManager
@@ -153,10 +153,6 @@ class P115StrgmSub(_PluginBase):
                 auth_enabled=self._pansou_auth_enabled
             )
 
-        # 初始化 115 客户端
-        if self._cookies:
-            self._p115_manager = P115ClientManager(cookies=self._cookies)
-
         # 初始化 Nullbr 客户端
         if self._nullbr_enabled:
             if not self._nullbr_appid or not self._nullbr_api_key:
@@ -170,6 +166,10 @@ class P115StrgmSub(_PluginBase):
             else:
                 self._nullbr_client = NullbrClient(app_id=self._nullbr_appid, api_key=self._nullbr_api_key)
                 logger.info("✓ Nullbr 客户端初始化成功")
+
+         # 初始化 115 客户端
+        if self._cookies:
+            self._p115_manager = P115ClientManager(cookies=self._cookies)
 
     def get_state(self) -> bool:
         return self._enabled
@@ -487,6 +487,52 @@ class P115StrgmSub(_PluginBase):
         
         return p115_results
 
+    def _send_transfer_notification(self, transfer_details: List[Dict[str, Any]], total_count: int):
+        """
+        发送转存完成通知
+
+        :param transfer_details: 转存详情列表
+        :param total_count: 转存总数
+        """
+        if not transfer_details:
+            return
+
+        # 构建通知文本
+        text_lines = []
+        first_image = None
+
+        for detail in transfer_details:
+            if detail.get("type") == "电影":
+                title = detail.get("title", "未知")
+                year = detail.get("year", "")
+                text_lines.append(f"🎬 {title} ({year})")
+                if not first_image and detail.get("image"):
+                    first_image = detail.get("image")
+            else:
+                title = detail.get("title", "未知")
+                season = detail.get("season", 1)
+                episodes = detail.get("episodes", [])
+                episodes.sort()
+                # 格式化集数显示
+                if len(episodes) <= 5:
+                    ep_str = ", ".join([f"E{e:02d}" for e in episodes])
+                else:
+                    ep_str = f"E{episodes[0]:02d}-E{episodes[-1]:02d} 共{len(episodes)}集"
+                text_lines.append(f"📺 {title} S{season:02d} {ep_str}")
+                if not first_image and detail.get("image"):
+                    first_image = detail.get("image")
+
+        # 限制显示数量，避免通知过长
+        if len(text_lines) > 10:
+            text_lines = text_lines[:10]
+            text_lines.append(f"... 等共 {len(transfer_details)} 项")
+
+        self.post_message(
+            mtype=NotificationType.Plugin,
+            title=f"【115网盘订阅追更】转存完成",
+            text=f"本次共转存 {total_count} 个文件\n\n" + "\n".join(text_lines)
+        )
+
     def stop_service(self):
         """退出插件"""
         try:
@@ -506,8 +552,26 @@ class P115StrgmSub(_PluginBase):
     def _do_sync(self):
         """执行同步"""
         # 检查至少有一个搜索客户端可用
-        if not self._pansou_client and not self._nullbr_client:
-            logger.error("PanSou 和 Nullbr 客户端均未初始化，请至少启用一个搜索源")
+        if not self._pansou_enabled and not self._nullbr_enabled:
+            logger.error("PanSou 和 Nullbr 搜索源均未启用，请至少启用一个搜索源")
+            return
+
+        # 检查已启用的搜索源是否成功初始化
+        has_valid_client = False
+        if self._pansou_enabled:
+            if self._pansou_client:
+                has_valid_client = True
+            else:
+                logger.warning("PanSou 已启用但客户端未初始化，请检查 PanSou URL 配置")
+
+        if self._nullbr_enabled:
+            if self._nullbr_client:
+                has_valid_client = True
+            else:
+                logger.warning("Nullbr 已启用但客户端未初始化，请检查 APP ID 和 API Key 配置")
+
+        if not has_valid_client:
+            logger.error("所有已启用的搜索源均初始化失败，请检查配置")
             return
         
         if not self._p115_manager:
@@ -519,8 +583,9 @@ class P115StrgmSub(_PluginBase):
             logger.error("115 登录失败，Cookie 可能已过期")
             if self._notify:
                 self.post_message(
-                    title="115网盘订阅追更",
-                    text="115 登录失败，Cookie 可能已过期，请更新配置"
+                    mtype=NotificationType.Manual,
+                    title="【115网盘订阅追更】登录失败",
+                    text="115 Cookie 可能已过期，请更新配置后重试。"
                 )
             return
 
@@ -548,6 +613,8 @@ class P115StrgmSub(_PluginBase):
         downloadchain = DownloadChain()
         history: List[dict] = self.get_data('history') or []
         transferred_count = 0
+        # 用于通知的转存详情列表
+        transfer_details: List[Dict[str, Any]] = []
 
         # 排除订阅ID列表
         exclude_ids = set(self._exclude_subscribes) if self._exclude_subscribes else set()
@@ -709,6 +776,15 @@ class P115StrgmSub(_PluginBase):
                                 movie_history_score = current_score  # 更新历史分数
                                 score_info = f"(分数:{current_score}, 完美匹配:{is_perfect})" if subscribe_filter.has_filters() else ""
                                 logger.info(f"成功转存电影：{mediainfo.title} {score_info}")
+
+                                # 收集转存详情用于通知
+                                transfer_details.append({
+                                    "type": "电影",
+                                    "title": mediainfo.title,
+                                    "year": mediainfo.year,
+                                    "image": mediainfo.get_poster_image(),
+                                    "file_name": file_name
+                                })
 
                                 # 电影转存成功后完成订阅
                                 self._check_and_finish_subscribe(
@@ -1009,6 +1085,24 @@ class P115StrgmSub(_PluginBase):
                                     score_info = f"(分数:{current_score}, 完美匹配:{is_perfect})" if subscribe_filter.has_filters() else ""
                                     upgrade_info = " [洗版升级]" if is_upgrade else ""
                                     logger.info(f"成功转存：{mediainfo.title} S{season:02d}E{episode:02d} {score_info}{upgrade_info}")
+
+                                    # 收集转存详情用于通知（按媒体聚合）
+                                    existing_detail = next(
+                                        (d for d in transfer_details
+                                         if d.get("title") == mediainfo.title and d.get("season") == season),
+                                        None
+                                    )
+                                    if existing_detail:
+                                        existing_detail["episodes"].append(episode)
+                                    else:
+                                        transfer_details.append({
+                                            "type": "电视剧",
+                                            "title": mediainfo.title,
+                                            "year": mediainfo.year,
+                                            "season": season,
+                                            "episodes": [episode],
+                                            "image": mediainfo.get_poster_image()
+                                        })
                                 else:
                                     logger.error(f"转存失败：{mediainfo.title} S{season:02d}E{episode:02d}")
 
@@ -1041,11 +1135,9 @@ class P115StrgmSub(_PluginBase):
 
         logger.info(f"115 网盘订阅追更完成，共转存 {transferred_count} 个文件")
 
+        # 发送汇总通知
         if self._notify and transferred_count > 0:
-            self.post_message(
-                title="115网盘订阅追更",
-                text=f"本次追更完成，共转存 {transferred_count} 个文件"
-            )
+            self._send_transfer_notification(transfer_details, transferred_count)
 
     def api_search(self, keyword: str, apikey: str) -> dict:
         """API: 搜索网盘资源"""
@@ -1125,16 +1217,19 @@ class P115StrgmSub(_PluginBase):
 
         logger.info("收到命令，开始执行 115 网盘订阅追更...")
         self.post_message(
+            mtype=NotificationType.Plugin,
             channel=event_data.get("channel"),
-            title="开始执行 115 网盘订阅追更...",
+            title="【115网盘订阅追更】开始执行",
+            text="已收到远程命令，正在执行订阅追更任务...",
             userid=event_data.get("user")
         )
-
 
         self.sync_subscribes()
 
         self.post_message(
+            mtype=NotificationType.Plugin,
             channel=event_data.get("channel"),
-            title="115 网盘订阅追更完成！",
+            title="【115网盘订阅追更】执行完成",
+            text="远程触发的订阅追更任务已完成，详情请查看追更通知或历史记录。",
             userid=event_data.get("user")
         )
