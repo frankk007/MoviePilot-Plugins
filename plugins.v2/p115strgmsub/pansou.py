@@ -51,6 +51,8 @@ class PanSouClient:
         self.auth_enabled = auth_enabled
         self._token: Optional[str] = None
         self._token_expires: Optional[datetime] = None
+        # API 调用计数器
+        self._api_call_count = 0
 
     def _get_token(self) -> Optional[str]:
         """获取或刷新 Token"""
@@ -73,6 +75,7 @@ class PanSouClient:
         # 登录获取新 Token
         try:
             login_url = f"{self.base_url}/api/auth/login"
+            self._api_call_count += 1
             response = requests.post(
                 login_url,
                 json={"username": self.username, "password": self.password},
@@ -159,6 +162,7 @@ class PanSouClient:
                 payload["cloud_types"] = cloud_types
 
             logger.info(f"PanSou 搜索: {payload}")
+            self._api_call_count += 1
             response = requests.post(search_url, json=payload, headers=headers, timeout=120)
           
 
@@ -170,6 +174,7 @@ class PanSouClient:
                 token = self._get_token()
                 if token:
                     headers["Authorization"] = f"Bearer {token}"
+                    self._api_call_count += 1
                     response = requests.post(search_url, json=payload, headers=headers, timeout=30)
 
             if response.status_code != 200:
@@ -271,3 +276,11 @@ class PanSouClient:
             return []
 
         return result.get("results", {}).get("115网盘", [])
+
+    def get_api_call_count(self) -> int:
+        """获取 API 调用次数"""
+        return self._api_call_count
+
+    def reset_api_call_count(self):
+        """重置 API 调用计数器"""
+        self._api_call_count = 0

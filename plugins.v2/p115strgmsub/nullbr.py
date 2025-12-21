@@ -29,6 +29,8 @@ class NullbrClient:
             "X-APP-ID": app_id,
             "X-API-KEY": api_key
         }
+        # API 调用计数器
+        self._api_call_count = 0
 
     def get_movie_resources(self, tmdb_id: int) -> List[Dict[str, Any]]:
         """
@@ -49,6 +51,7 @@ class NullbrClient:
         try:
             url = f"{self.BASE_URL}/movie/{tmdb_id}/115"
 
+            self._api_call_count += 1
             response = requests.get(
                 url,
                 headers=self.headers,
@@ -102,6 +105,7 @@ class NullbrClient:
         try:
             url = f"{self.BASE_URL}/tv/{tmdb_id}/115"
 
+            self._api_call_count += 1
             response = requests.get(
                 url,
                 headers=self.headers,
@@ -166,6 +170,7 @@ class NullbrClient:
             # 使用一个知名电影的 TMDB ID 来测试连接（例如：肖申克的救赎 278）
             url = f"{self.BASE_URL}/movie/278/115"
 
+            self._api_call_count += 1
             response = requests.get(
                 url,
                 headers=self.headers,
@@ -178,3 +183,11 @@ class NullbrClient:
         except Exception as e:
             logger.error(f"Nullbr 连接检查失败: {e}")
             return False
+
+    def get_api_call_count(self) -> int:
+        """获取 API 调用次数"""
+        return self._api_call_count
+
+    def reset_api_call_count(self):
+        """重置 API 调用计数器"""
+        self._api_call_count = 0

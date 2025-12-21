@@ -197,6 +197,9 @@ class P115ClientManager:
         :param recursion_delay: 递归遍历子目录延迟（秒），默认 0.3
         :param path_cache_ttl: 路径缓存过期时间（秒），默认 3600
         """
+        # API 调用计数器
+        self._api_call_count = 0
+
         self.cookies = cookies
         self.user_agent = user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         self.client: Optional[Any] = None
@@ -240,6 +243,7 @@ class P115ClientManager:
 
         try:
             self.rate_limiter.wait()
+            self._api_call_count += 1
             user_info = self.client.user_my_info()
             if user_info.get("state"):
                 uname = user_info.get('data', {}).get('uname', '未知')
@@ -279,6 +283,7 @@ class P115ClientManager:
         # 尝试直接通过 API 获取完整路径
         try:
             self.rate_limiter.wait()
+            self._api_call_count += 1
             resp = self.client.fs_dir_getid(path)
             if resp.get("id"):
                 cid = int(resp["id"])
@@ -291,7 +296,7 @@ class P115ClientManager:
         if not mkdir:
             return -1
 
-        # 递归创建/查找（优化：从最近的已缓存路径开始）
+        # ===== 优化：创建模式下直接逐级创建，不再每层都先尝试获取 =====
         parts = [p for p in path.split("/") if p]
         parent_id = 0
         current_path = ""
@@ -307,7 +312,7 @@ class P115ClientManager:
                 current_path = temp_path
                 start_index = i + 1
 
-        # 从未缓存的部分开始处理
+        # 从未缓存的部分开始处理（优化：直接创建，不再先获取）
         for i in range(start_index, len(parts)):
             part = parts[i]
             current_path = f"{current_path}/{part}"
@@ -318,21 +323,10 @@ class P115ClientManager:
                 parent_id = cached
                 continue
 
-            # 尝试获取该层级 ID
+            # 直接创建目录（fs_makedirs_app 会自动处理已存在的情况）
             try:
                 self.rate_limiter.wait()
-                resp = self.client.fs_dir_getid(current_path)
-                if resp.get("id"):
-                    cid = int(resp["id"])
-                    self.path_cache.set(current_path, cid)
-                    parent_id = cid
-                    continue
-            except Exception:
-                pass
-
-            # 创建目录
-            try:
-                self.rate_limiter.wait()
+                self._api_call_count += 1
                 resp = self.client.fs_makedirs_app(part, pid=parent_id)
                 check_response(resp)
                 if resp.get("state"):
@@ -340,6 +334,21 @@ class P115ClientManager:
                     self.path_cache.set(current_path, cid)
                     parent_id = cid
                     logger.info(f"创建目录成功: {current_path} -> {cid}")
+                elif resp.get("errno") == 20004 or "已存在" in resp.get("error", ""):
+                    # 目录已存在，尝试获取其 ID
+                    try:
+                        self.rate_limiter.wait()
+                        self._api_call_count += 1
+                        get_resp = self.client.fs_dir_getid(current_path)
+                        if get_resp.get("id"):
+                            cid = int(get_resp["id"])
+                            self.path_cache.set(current_path, cid)
+                            parent_id = cid
+                            continue
+                    except Exception:
+                        pass
+                    logger.error(f"目录已存在但无法获取ID: {current_path}")
+                    return -1
                 else:
                     logger.error(f"创建目录失败 {current_path}: {resp.get('error')}")
                     return -1
@@ -402,6 +411,7 @@ class P115ClientManager:
         try:
             # 使用 share_snap 接口检查分享状态
             self.rate_limiter.wait()
+            self._api_call_count += 1
             payload = {
                 "share_code": share_code,
                 "receive_code": receive_code or "",
@@ -477,7 +487,8 @@ class P115ClientManager:
             self,
             share_url: str,
             cid: int = 0,
-            max_depth: int = 3
+            max_depth: int = 3,
+            target_season: int = None
     ) -> List[dict]:
         """
         列出分享链接内的文件
@@ -485,6 +496,7 @@ class P115ClientManager:
         :param share_url: 115 分享链接
         :param cid: 目录 ID，0 为根目录
         :param max_depth: 最大递归深度
+        :param target_season: 目标季数，用于优化递归（跳过明显不匹配的目录）
         :return: 文件列表
         """
         if not self.client:
@@ -503,7 +515,8 @@ class P115ClientManager:
             receive_code=receive_code,
             cid=cid,
             depth=1,
-            max_depth=max_depth
+            max_depth=max_depth,
+            target_season=target_season
         )
 
     def _list_share_files_recursive(
@@ -512,9 +525,10 @@ class P115ClientManager:
             receive_code: str,
             cid: int = 0,
             depth: int = 1,
-            max_depth: int = 3
+            max_depth: int = 3,
+            target_season: int = None
     ) -> List[dict]:
-        """递归列出分享文件（带速率限制）"""
+        """递归列出分享文件（带速率限制和季数过滤优化）"""
         if depth > max_depth:
             return []
 
@@ -522,6 +536,7 @@ class P115ClientManager:
         try:
             # 速率限制
             self.rate_limiter.wait()
+            self._api_call_count += 1
 
             iterator = share_iterdir(
                 self.client,
@@ -530,7 +545,6 @@ class P115ClientManager:
                 cid=cid,
                 app="web",
             )
-            
 
             for item in iterator:
                 file_info = {
@@ -544,6 +558,16 @@ class P115ClientManager:
 
                 # 递归获取子目录内容（带随机延迟）
                 if file_info["is_dir"] and depth < max_depth:
+                    dir_name = file_info["name"]
+
+                    # 优化：如果指定了目标季数，跳过明显不匹配的季目录
+                    if target_season is not None:
+                        skip_dir = self._should_skip_season_dir(dir_name, target_season)
+                        if skip_dir:
+                            logger.debug(f"跳过非目标季目录: {dir_name} (目标: S{target_season})")
+                            files.append(file_info)  # 仍然记录目录信息，但不递归
+                            continue
+
                     # 递归前增加随机延迟，避免频繁请求
                     if self.recursion_delay > 0:
                         import random
@@ -557,7 +581,8 @@ class P115ClientManager:
                         receive_code=receive_code,
                         cid=sub_cid,
                         depth=depth + 1,
-                        max_depth=max_depth
+                        max_depth=max_depth,
+                        target_season=target_season
                     )
                     file_info["children"] = children
 
@@ -567,6 +592,51 @@ class P115ClientManager:
             logger.error(f"列出分享文件失败: {e}")
 
         return files
+
+    def _should_skip_season_dir(self, dir_name: str, target_season: int) -> bool:
+        """
+        判断是否应该跳过该目录（明显是其他季的目录）
+
+        :param dir_name: 目录名
+        :param target_season: 目标季数
+        :return: True 表示应跳过，False 表示需要递归
+        """
+        import re
+
+        # 常见的季数目录命名模式
+        patterns = [
+            r'[Ss]eason\s*(\d+)',      # Season 1, season1
+            r'[Ss](\d+)',              # S1, s01
+            r'第(\d+)季',              # 第1季
+            r'第([一二三四五六七八九十]+)季',  # 第一季
+        ]
+
+        # 中文数字映射
+        cn_num_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                      '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+
+        for pattern in patterns:
+            match = re.search(pattern, dir_name)
+            if match:
+                season_str = match.group(1)
+                # 转换中文数字
+                if season_str in cn_num_map:
+                    found_season = cn_num_map[season_str]
+                else:
+                    try:
+                        found_season = int(season_str)
+                    except ValueError:
+                        continue
+
+                # 如果目录明确是其他季，跳过
+                if found_season != target_season:
+                    return True
+                else:
+                    # 明确是目标季，不跳过
+                    return False
+
+        # 目录名没有明显的季数标识，不跳过（可能包含多季或其他内容）
+        return False
 
     def transfer_share(self, share_url: str, save_path: str) -> bool:
         """
@@ -644,6 +714,99 @@ class P115ClientManager:
             save_path=save_path
         )
 
+    def transfer_files_batch(
+            self,
+            share_url: str,
+            file_ids: List[str],
+            save_path: str,
+            batch_size: int = 20,
+            batch_interval: float = 3.0
+    ) -> Tuple[List[str], List[str]]:
+        """
+        批量转存分享中的多个文件，减少 API 调用次数以避免风控
+
+        :param share_url: 115 分享链接
+        :param file_ids: 文件 ID 列表
+        :param save_path: 保存路径
+        :param batch_size: 每批转存的文件数量，默认 20
+        :param batch_interval: 批次之间的间隔时间（秒），默认 3 秒
+        :return: (成功的 file_ids 列表, 失败的 file_ids 列表)
+        """
+        success_ids: List[str] = []
+        failed_ids: List[str] = []
+        batch_size = int(batch_size)
+
+        if not self.client:
+            return success_ids, file_ids
+
+        if not file_ids:
+            return success_ids, failed_ids
+
+        info = self.extract_share_info(share_url)
+        share_code = info.get("share_code")
+        receive_code = info.get("receive_code")
+
+        if not share_code or not receive_code:
+            logger.error("无效的分享链接或解析失败")
+            return success_ids, file_ids
+
+        # 获取目标目录 CID（只需获取一次）
+        parent_id = self.get_pid_by_path(save_path, mkdir=True)
+        if parent_id == -1:
+            logger.error(f"无法获取或创建目标目录: {save_path}")
+            return success_ids, file_ids
+
+        total_batches = (len(file_ids) + batch_size - 1) // batch_size
+        logger.info(f"批量转存: 共 {len(file_ids)} 个文件，分 {total_batches} 批处理（每批 {batch_size} 个）")
+
+        # 分批处理
+        for batch_index in range(0, len(file_ids), batch_size):
+            batch = file_ids[batch_index:batch_index + batch_size]
+            batch_num = batch_index // batch_size + 1
+
+            # 使用逗号分隔多个文件 ID
+            file_id_str = ",".join(batch)
+
+            logger.info(f"处理第 {batch_num}/{total_batches} 批，包含 {len(batch)} 个文件")
+
+            success = self._do_transfer(
+                share_code=share_code,
+                receive_code=receive_code,
+                file_id=file_id_str,
+                parent_id=parent_id,
+                save_path=save_path
+            )
+
+            if success:
+                success_ids.extend(batch)
+                logger.info(f"第 {batch_num} 批转存成功")
+            else:
+                # 批量失败时，尝试逐个转存以确定哪些失败
+                logger.warning(f"第 {batch_num} 批批量转存失败，尝试逐个转存...")
+                for fid in batch:
+                    single_success = self._do_transfer(
+                        share_code=share_code,
+                        receive_code=receive_code,
+                        file_id=fid,
+                        parent_id=parent_id,
+                        save_path=save_path
+                    )
+                    if single_success:
+                        success_ids.append(fid)
+                    else:
+                        failed_ids.append(fid)
+
+            # 批次之间添加间隔，避免触发风控
+            if batch_index + batch_size < len(file_ids):
+                import random
+                jitter = batch_interval * 0.3
+                actual_interval = batch_interval + random.uniform(-jitter, jitter)
+                logger.debug(f"批次间隔 {actual_interval:.1f} 秒")
+                time.sleep(actual_interval)
+
+        logger.info(f"批量转存完成: 成功 {len(success_ids)} 个，失败 {len(failed_ids)} 个")
+        return success_ids, failed_ids
+
     def _do_transfer(
             self,
             share_code: str,
@@ -679,6 +842,7 @@ class P115ClientManager:
         for attempt in range(max_retries + 1):
             try:
                 self.rate_limiter.wait()
+                self._api_call_count += 1
                 resp = self.client.share_receive(payload)
 
                 if resp.get("state"):
@@ -735,6 +899,7 @@ class P115ClientManager:
 
         try:
             self.rate_limiter.wait()
+            self._api_call_count += 1
             resp = self.client.fs_files({"cid": cid, "limit": 1000})
             if resp.get("state"):
                 return resp.get("data", [])
@@ -774,3 +939,11 @@ class P115ClientManager:
     def clear_share_cache(self):
         """清空分享信息缓存"""
         self._share_info_cache.clear()
+
+    def get_api_call_count(self) -> int:
+        """获取 API 调用次数"""
+        return self._api_call_count
+
+    def reset_api_call_count(self):
+        """重置 API 调用计数器"""
+        self._api_call_count = 0

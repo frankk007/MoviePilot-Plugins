@@ -81,6 +81,9 @@ class P115StrgmSub(_PluginBase):
     _nullbr_api_key: str = ""  # Nullbr API Key
     _nullbr_priority: bool = True  # Nullbr 优先（True: 优先使用 Nullbr，False: 优先使用 PanSou）
     _block_system_subscribe: bool = False  # 是否屏蔽系统订阅
+    _max_transfer_per_sync: int = 50  # 单次同步最大转存数量，防止风控
+    _batch_size: int = 20  # 批量转存每批文件数
+    _skip_other_season_dirs: bool = True  # 跳过其他季目录以减少API调用
     # 运行时对象
     _pansou_client: Optional[PanSouClient] = None
     _p115_manager: Optional[P115ClientManager] = None
@@ -112,7 +115,10 @@ class P115StrgmSub(_PluginBase):
             self._nullbr_appid = config.get("nullbr_appid", "")
             self._nullbr_api_key = config.get("nullbr_api_key", "")
             self._nullbr_priority = config.get("nullbr_priority", True)
-            
+            self._max_transfer_per_sync = int(config.get("max_transfer_per_sync", 50) or 50)
+            self._batch_size = int(config.get("batch_size", 20) or 20)
+            self._skip_other_season_dirs = config.get("skip_other_season_dirs", True)
+
             # 处理屏蔽系统订阅开关
             new_block_state = config.get("block_system_subscribe", False)
             old_block_state = self._block_system_subscribe
@@ -271,7 +277,10 @@ class P115StrgmSub(_PluginBase):
             "nullbr_api_key": self._nullbr_api_key,
             "nullbr_priority": self._nullbr_priority,
             "exclude_subscribes": self._exclude_subscribes,
-            "block_system_subscribe": self._block_system_subscribe
+            "block_system_subscribe": self._block_system_subscribe,
+            "max_transfer_per_sync": self._max_transfer_per_sync,
+            "batch_size": self._batch_size,
+            "skip_other_season_dirs": self._skip_other_season_dirs
         })
 
     def _update_subscribe_sites(self, block: bool):
@@ -590,6 +599,14 @@ class P115StrgmSub(_PluginBase):
             return
 
         logger.info("开始执行 115 网盘订阅追更...")
+
+        # 重置 API 调用计数器
+        if self._p115_manager:
+            self._p115_manager.reset_api_call_count()
+        if self._pansou_client:
+            self._pansou_client.reset_api_call_count()
+        if self._nullbr_client:
+            self._nullbr_client.reset_api_call_count()
 
         # 获取所有订阅，状态为 R (订阅中) 的
         # 使用新会话避免 ScopedSession 缓存问题，确保获取最新数据
@@ -979,8 +996,16 @@ class P115StrgmSub(_PluginBase):
                 # 成功转存的集数列表
                 success_episodes = []
 
+                # 构建转存路径（提前构建，批量转存共用）
+                save_dir = f"{self._save_path}/{mediainfo.title}/Season {season}"
+
                 # 遍历搜索结果，尝试找到并转存缺失剧集
                 for resource in p115_results:
+                    # 检查单次同步上限
+                    if transferred_count >= self._max_transfer_per_sync:
+                        logger.info(f"已达单次同步上限 {self._max_transfer_per_sync}，剩余 {len(missing_episodes)} 集将在下次同步处理")
+                        break
+
                     share_url = resource.get("url", "")
                     resource_title = resource.get("title", "")
 
@@ -989,8 +1014,6 @@ class P115StrgmSub(_PluginBase):
 
                     # 简单的标题过滤
                     if mediainfo.title not in resource_title:
-                        # logger.info(f"跳过不匹配的资源: {resource_title}")
-                        # continue
                         pass
 
                     logger.info(f"检查分享：{resource_title} - {share_url}")
@@ -1003,16 +1026,17 @@ class P115StrgmSub(_PluginBase):
                             continue
 
                         # 列出分享内容
-                        share_files = self._p115_manager.list_share_files(share_url)
+                        share_files = self._p115_manager.list_share_files(share_url,target_season=(season if self._skip_other_season_dirs else None))
                         if not share_files:
                             logger.info(f"分享链接无内容：{share_url}")
                             continue
 
                         logger.info(f"分享包含 {len(share_files)} 个文件/目录")
 
-                        # 匹配缺失剧集（应用过滤条件）
-                        matched_count = 0
-                        for episode in missing_episodes[:]:  # 使用切片复制，因为会修改列表
+                        # 第一阶段：收集该分享中所有匹配的文件（不立即转存）
+                        matched_items = []  # 存储匹配信息: {file, episode, score, is_perfect, is_upgrade}
+
+                        for episode in missing_episodes[:]:
                             matched_file = FileMatcher.match_episode_file(
                                 share_files,
                                 mediainfo.title,
@@ -1022,7 +1046,6 @@ class P115StrgmSub(_PluginBase):
                             )
 
                             if matched_file:
-                                matched_count += 1
                                 file_name = matched_file.get('name', '')
                                 logger.info(f"找到匹配文件：{file_name} -> E{episode:02d}")
 
@@ -1031,6 +1054,7 @@ class P115StrgmSub(_PluginBase):
                                 is_perfect = subscribe_filter.is_perfect_match(file_name) if subscribe_filter.has_filters() else True
 
                                 # 洗版模式下检查是否需要升级资源
+                                is_upgrade = False
                                 if is_best_version and episode in episode_history_scores:
                                     old_score = episode_history_scores[episode]
                                     if current_score <= old_score:
@@ -1038,77 +1062,101 @@ class P115StrgmSub(_PluginBase):
                                         continue
                                     else:
                                         logger.info(f"E{episode:02d} 洗版：旧分数 {old_score} -> 新分数 {current_score}")
+                                        is_upgrade = True
 
-                                # 构建转存路径
-                                save_dir = f"{self._save_path}/{mediainfo.title}/Season {season}"
-                                logger.info(f"转存目标路径: {save_dir}")
-
-                                # 执行转存
-                                success = self._p115_manager.transfer_file(
-                                    share_url=share_url,
-                                    file_id=matched_file.get("id"),
-                                    save_path=save_dir
-                                )
-
-                                # 记录历史（包含分数信息）
-                                history_item = {
-                                    "title": mediainfo.title,
-                                    "season": season,
+                                matched_items.append({
+                                    "file": matched_file,
                                     "episode": episode,
-                                    "status": "成功" if success else "失败",
-                                    "share_url": share_url,
-                                    "file_name": file_name,
-                                    "filter_score": current_score,
-                                    "perfect_match": is_perfect,
-                                    "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                }
-                                history.append(history_item)
+                                    "score": current_score,
+                                    "is_perfect": is_perfect,
+                                    "is_upgrade": is_upgrade
+                                })
 
-                                if success:
-                                    transferred_count += 1
-
-                                    # 判断是否是洗版升级（在更新 episode_history_scores 之前判断）
-                                    # 如果这集之前已有历史记录，说明是升级而非填补缺失
-                                    is_upgrade = is_best_version and episode in episode_history_scores
-
-                                    # 更新历史分数记录
-                                    episode_history_scores[episode] = current_score
-                                    # 只有在 missing_episodes 中才移除
-                                    if episode in missing_episodes:
-                                        missing_episodes.remove(episode)
-
-                                    # 只有新转存（非洗版升级）的才加入 success_episodes
-                                    # 洗版升级不应该减少 lack_episode
-                                    if not is_upgrade:
-                                        success_episodes.append(episode)
-
-                                    score_info = f"(分数:{current_score}, 完美匹配:{is_perfect})" if subscribe_filter.has_filters() else ""
-                                    upgrade_info = " [洗版升级]" if is_upgrade else ""
-                                    logger.info(f"成功转存：{mediainfo.title} S{season:02d}E{episode:02d} {score_info}{upgrade_info}")
-
-                                    # 收集转存详情用于通知（按媒体聚合）
-                                    existing_detail = next(
-                                        (d for d in transfer_details
-                                         if d.get("title") == mediainfo.title and d.get("season") == season),
-                                        None
-                                    )
-                                    if existing_detail:
-                                        existing_detail["episodes"].append(episode)
-                                    else:
-                                        transfer_details.append({
-                                            "type": "电视剧",
-                                            "title": mediainfo.title,
-                                            "year": mediainfo.year,
-                                            "season": season,
-                                            "episodes": [episode],
-                                            "image": mediainfo.get_poster_image()
-                                        })
-                                else:
-                                    logger.error(f"转存失败：{mediainfo.title} S{season:02d}E{episode:02d}")
-
-                        # 如果该分享没有匹配到任何剧集，打印提示
-                        if matched_count == 0:
+                        # 如果该分享没有匹配到任何剧集，跳过
+                        if not matched_items:
                             logger.info(f"该分享未匹配到 S{season} 的任何缺失剧集，可能是季数不匹配或文件名无法识别")
+                            continue
+
+                        # 检查转存配额限制
+                        remaining_quota = self._max_transfer_per_sync - transferred_count
+                        if len(matched_items) > remaining_quota:
+                            logger.info(f"匹配 {len(matched_items)} 集，但受配额限制仅转存 {remaining_quota} 集")
+                            matched_items = matched_items[:remaining_quota]
+
+                        # 第二阶段：批量转存
+                        file_ids = [item["file"]["id"] for item in matched_items]
+                        logger.info(f"准备批量转存 {len(file_ids)} 个文件到: {save_dir}")
+
+                        success_ids, failed_ids = self._p115_manager.transfer_files_batch(
+                            share_url=share_url,
+                            file_ids=file_ids,
+                            save_path=save_dir,
+                            batch_size=self._batch_size
+                        )
+
+                        # 将成功的 file_id 转为集合，便于快速查找
+                        success_id_set = set(success_ids)
+
+                        # 第三阶段：根据批量转存结果处理历史记录和状态
+                        for item in matched_items:
+                            file_id = item["file"]["id"]
+                            episode = item["episode"]
+                            file_name = item["file"]["name"]
+                            current_score = item["score"]
+                            is_perfect = item["is_perfect"]
+                            is_upgrade = item["is_upgrade"]
+                            success = file_id in success_id_set
+
+                            # 记录历史
+                            history_item = {
+                                "title": mediainfo.title,
+                                "season": season,
+                                "episode": episode,
+                                "status": "成功" if success else "失败",
+                                "share_url": share_url,
+                                "file_name": file_name,
+                                "filter_score": current_score,
+                                "perfect_match": is_perfect,
+                                "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }
+                            history.append(history_item)
+
+                            if success:
+                                transferred_count += 1
+
+                                # 更新历史分数记录
+                                episode_history_scores[episode] = current_score
+                                # 从缺失列表移除
+                                if episode in missing_episodes:
+                                    missing_episodes.remove(episode)
+
+                                # 只有新转存（非洗版升级）的才加入 success_episodes
+                                if not is_upgrade:
+                                    success_episodes.append(episode)
+
+                                score_info = f"(分数:{current_score}, 完美匹配:{is_perfect})" if subscribe_filter.has_filters() else ""
+                                upgrade_info = " [洗版升级]" if is_upgrade else ""
+                                logger.info(f"成功转存：{mediainfo.title} S{season:02d}E{episode:02d} {score_info}{upgrade_info}")
+
+                                # 收集转存详情用于通知（按媒体聚合）
+                                existing_detail = next(
+                                    (d for d in transfer_details
+                                     if d.get("title") == mediainfo.title and d.get("season") == season),
+                                    None
+                                )
+                                if existing_detail:
+                                    existing_detail["episodes"].append(episode)
+                                else:
+                                    transfer_details.append({
+                                        "type": "电视剧",
+                                        "title": mediainfo.title,
+                                        "year": mediainfo.year,
+                                        "season": season,
+                                        "episodes": [episode],
+                                        "image": mediainfo.get_poster_image()
+                                    })
+                            else:
+                                logger.error(f"转存失败：{mediainfo.title} S{season:02d}E{episode:02d}")
 
                         # 如果所有缺失剧集都已转存，跳出循环
                         if not missing_episodes:
@@ -1134,6 +1182,17 @@ class P115StrgmSub(_PluginBase):
         self.save_data('history', history[-500:])  # 只保留最近500条
 
         logger.info(f"115 网盘订阅追更完成，共转存 {transferred_count} 个文件")
+
+        # 打印 API 调用统计
+        api_stats = []
+        if self._p115_manager:
+            api_stats.append(f"115接口: {self._p115_manager.get_api_call_count()}次")
+        if self._pansou_client:
+            api_stats.append(f"PanSou接口: {self._pansou_client.get_api_call_count()}次")
+        if self._nullbr_client:
+            api_stats.append(f"Nullbr接口: {self._nullbr_client.get_api_call_count()}次")
+        if api_stats:
+            logger.info(f"本次同步 API 调用统计: {', '.join(api_stats)}")
 
         # 发送汇总通知
         if self._notify and transferred_count > 0:

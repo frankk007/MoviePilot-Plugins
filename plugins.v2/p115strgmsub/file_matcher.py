@@ -415,10 +415,16 @@ class FileMatcher:
             return existing_episodes
 
         try:
+            # 优化：先检查目录是否存在，避免无效的 list_files 调用
+            dir_id = p115_manager.get_pid_by_path(save_dir, mkdir=False)
+            if dir_id == -1:
+                logger.info(f"网盘目录不存在，跳过检查: {save_dir}")
+                return existing_episodes
+
             # 列出网盘目录中的文件
             files = p115_manager.list_files(save_dir)
             if not files:
-                logger.info(f"网盘目录为空或不存在: {save_dir}")
+                logger.info(f"网盘目录为空: {save_dir}")
                 return existing_episodes
 
             logger.info(f"检查网盘目录 {save_dir}，共 {len(files)} 个文件")

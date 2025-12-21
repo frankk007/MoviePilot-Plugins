@@ -141,6 +141,24 @@ class UIConfig:
                             {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'nullbr_api_key', 'label': 'Nullbr API Key', 'type': 'password', 'placeholder': '请输入 API Key'}}]}
                         ]
                     },
+                    # 风控防护说明
+                    {
+                        'component': 'VRow',
+                        'content': [{
+                            'component': 'VCol',
+                            'props': {'cols': 12},
+                            'content': [{'component': 'VAlert', 'props': {'type': 'warning', 'variant': 'tonal', 'text': '风控防护：批量转存和单次上限可有效避免115网盘风控，建议保持默认值或适当调低'}}]
+                        }]
+                    },
+                    # 风控防护配置
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 6, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'max_transfer_per_sync', 'label': '单次同步上限', 'type': 'number', 'placeholder': '50', 'hint': '每次同步最多转存文件数'}}]},
+                            {'component': 'VCol', 'props': {'cols': 6, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'batch_size', 'label': '批量转存大小', 'type': 'number', 'placeholder': '20', 'hint': '每批转存文件数'}}]},
+                            {'component': 'VCol', 'props': {'cols': 6, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'skip_other_season_dirs', 'label': '多季剧集快速转存', 'type': 'number', 'placeholder': '20', 'hint': '跳过其他季目录以减少API调用，资源搜索不到的时候需要关闭此功能'}}]}
+                        ]
+                    },
                     # 排除订阅
                     {
                         'component': 'VRow',
@@ -174,7 +192,9 @@ class UIConfig:
             "nullbr_api_key": "",
             "nullbr_priority": True,
             "exclude_subscribes": [],
-            "block_system_subscribe": False
+            "block_system_subscribe": False,
+            "max_transfer_per_sync": 50,
+            "batch_size": 20
         }
         
         return form_schema, default_config
