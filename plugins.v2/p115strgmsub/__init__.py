@@ -47,7 +47,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.0.9"
+    plugin_version = "1.1.0"
     # 插件作者
     plugin_author = "mrtian2016"
     # 作者主页
@@ -65,7 +65,7 @@ class P115StrgmSub(_PluginBase):
     # 配置属性
     _enabled: bool = False
     _onlyonce: bool = False
-    _cron: str = "30 */8 * * *"
+    _cron: str = "0 */8 * * *"
     _notify: bool = False
     _cookies: str = ""
     _pansou_enabled: bool = True  # 是否启用 PanSou 搜索
@@ -96,25 +96,18 @@ class P115StrgmSub(_PluginBase):
     _nullbr_client: Optional[NullbrClient] = None
     _hdhive_client: Optional[Any] = None  # HDHive 客户端
 
-    def _download_so_file(self):
+    def _get_hdhive_extension_filename(self) -> Optional[str]:
         """
-        下载 hdhive .so 文件到 lib 目录
-        
-        从 GitHub 下载编译好的 .so 文件，用于 HDHive 功能
+        根据当前平台获取 hdhive 扩展模块的文件名
+
+        :return: 文件名，如果平台不支持则返回 None
         """
         import platform
-        import urllib.request
-        import urllib.error
-        
-        # 确定目标目录
-        lib_dir = Path(__file__).parent / "lib"
-        lib_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 确定系统架构和平台
+
         machine = platform.machine().lower()
         system = platform.system().lower()
-        
-        # 映射常见的架构名称
+
+        # 映射架构名称
         arch_map = {
             "x86_64": "x86_64",
             "amd64": "x86_64",
@@ -122,55 +115,78 @@ class P115StrgmSub(_PluginBase):
             "arm64": "aarch64",
         }
         arch = arch_map.get(machine, machine)
-        
-        # 映射平台名称
-        platform_map = {
-            "linux": "linux-gnu",
-            "darwin": "darwin",
-        }
-        plat = platform_map.get(system, system)
-        
-        # 构建文件名（Linux: hdhive.cpython-312-x86_64-linux-gnu.so）
-        # 目前只支持 Linux x86_64
-        so_filename = f"hdhive.cpython-312-{arch}-{plat}.so"
-        target_path = lib_dir / so_filename
-        
-        # 如果文件已存在，跳过下载
-        if target_path.exists():
-            logger.debug(f"hdhive .so 文件已存在: {target_path}")
+
+        if system == "windows":
+            # Windows: .pyd 文件 (Nuitka 编译产物)
+            return f"hdhive.cp312-win_{arch}.pyd"
+        elif system == "darwin":
+            # macOS: 文件名不含架构前缀
+            return "hdhive.cpython-312-darwin.so"
+        elif system == "linux":
+            # Linux: 包含完整架构信息
+            return f"hdhive.cpython-312-{arch}-linux-gnu.so"
+        else:
+            return None
+
+    def _download_so_file(self):
+        """
+        检查并确保 hdhive 扩展模块可用
+
+        优先使用本地预编译的文件，如果不存在则尝试从 GitHub 下载
+        """
+        import platform
+
+        lib_dir = Path(__file__).parent / "lib"
+        lib_dir.mkdir(parents=True, exist_ok=True)
+
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+
+        # 获取当前平台对应的文件名
+        ext_filename = self._get_hdhive_extension_filename()
+        if not ext_filename:
+            logger.warning(f"⚠️ 不支持的平台: {system}/{machine}，HDHive 功能无法使用")
             return
-        
-        # GitHub 原始文件 URL
-        
-        base_url = "https://ghfast.top/https://raw.githubusercontent.com/mrtian2016/hdhive_resource/main/"
-        download_url = f"{base_url}/{so_filename}"
-        
-        logger.info(f"开始下载 hdhive .so 文件: {download_url}")
-        
+
+        target_path = lib_dir / ext_filename
+
+        # 本地文件已存在，直接返回
+        if target_path.exists():
+            logger.debug(f"hdhive 扩展模块已存在: {target_path}")
+            return
+
+        # 本地不存在，尝试从 GitHub 下载
+        import urllib.request
+        import urllib.error
+
+        base_url = "https://ghfast.top/https://raw.githubusercontent.com/mrtian2016/hdhive_resource/main"
+        download_url = f"{base_url}/{ext_filename}"
+
+        logger.info(f"本地未找到 hdhive 扩展模块，尝试下载: {download_url}")
+
         try:
-            # 下载文件
             with urllib.request.urlopen(download_url, timeout=120) as response:
                 content = response.read()
-            
-            # 保存到本地
+
             with open(target_path, "wb") as f:
                 f.write(content)
-            
-            # 设置可执行权限
-            import os
-            os.chmod(target_path, 0o755)
-            
-            logger.info(f"✓ hdhive .so 文件下载成功: {target_path}")
-            
+
+            # 非 Windows 平台设置可执行权限
+            if system != "windows":
+                import os
+                os.chmod(target_path, 0o755)
+
+            logger.info(f"✓ hdhive 扩展模块下载成功: {target_path}")
+
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                logger.warning(f"⚠️ hdhive .so 文件不存在（当前平台: {system}/{arch}），HDHive 功能可能无法使用")
+                logger.warning(f"⚠️ hdhive 扩展模块暂不支持当前平台 ({system}/{machine})，HDHive 功能无法使用")
             else:
-                logger.error(f"下载 hdhive .so 文件失败 (HTTP {e.code}): {e}")
+                logger.error(f"下载 hdhive 扩展模块失败 (HTTP {e.code}): {e}")
         except urllib.error.URLError as e:
-            logger.error(f"下载 hdhive .so 文件失败（网络错误）: {e}")
+            logger.error(f"下载 hdhive 扩展模块失败（网络错误）: {e}")
         except Exception as e:
-            logger.error(f"下载 hdhive .so 文件失败: {e}")
+            logger.error(f"下载 hdhive 扩展模块失败: {e}")
 
     def init_plugin(self, config: dict = None):
         """初始化插件"""
@@ -240,13 +256,18 @@ class P115StrgmSub(_PluginBase):
 
     def _init_clients(self):
         """初始化客户端"""
+        proxy = settings.PROXY
+        if proxy:
+            logger.info(f"使用 MoviePilot PROXY: {proxy}")
+
         # 初始化 PanSou 客户端
         if self._pansou_enabled and self._pansou_url:
             self._pansou_client = PanSouClient(
                 base_url=self._pansou_url,
                 username=self._pansou_username,
                 password=self._pansou_password,
-                auth_enabled=self._pansou_auth_enabled
+                auth_enabled=self._pansou_auth_enabled,
+                proxy=proxy
             )
 
         # 初始化 Nullbr 客户端
@@ -260,7 +281,7 @@ class P115StrgmSub(_PluginBase):
                 logger.warning(f"⚠️ Nullbr 已启用但缺少必要配置：{', '.join(missing)}，将无法使用 Nullbr 查询功能")
                 self._nullbr_client = None
             else:
-                self._nullbr_client = NullbrClient(app_id=self._nullbr_appid, api_key=self._nullbr_api_key)
+                self._nullbr_client = NullbrClient(app_id=self._nullbr_appid, api_key=self._nullbr_api_key, proxy=proxy)
                 logger.info("✓ Nullbr 客户端初始化成功")
 
         # 初始化 HDHive 客户端
@@ -273,8 +294,8 @@ class P115StrgmSub(_PluginBase):
                 try:
                     import os
                     from .lib.hdhive import create_client as create_hdhive_client
-                    proxy_host = os.environ.get("PROXY_HOST")
-                    proxy = {"http": proxy_host, "https": proxy_host} if proxy_host else None
+                    proxy = settings.PROXY
+                    logger.info(f"使用Moviepilot PROXY: {proxy}")
                     self._hdhive_client = create_hdhive_client(cookie=self._hdhive_cookie, proxy=proxy)
                     logger.info("✓ HDHive 客户端初始化成功（Cookie 模式）")
                 except Exception as e:
@@ -374,7 +395,7 @@ class P115StrgmSub(_PluginBase):
             "notify": self._notify,
             "onlyonce": self._onlyonce,
             "only_115": self._only_115,
-            "cron": self._cron,
+            # "cron": self._cron,
             "save_path": self._save_path,
             "movie_save_path": self._movie_save_path,
             "cookies": self._cookies,

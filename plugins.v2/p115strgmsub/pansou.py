@@ -35,7 +35,8 @@ class PanSouClient:
             base_url: str,
             username: str = "",
             password: str = "",
-            auth_enabled: bool = True
+            auth_enabled: bool = True,
+            proxy: str = None
     ):
         """
         初始化 PanSou 客户端
@@ -44,6 +45,7 @@ class PanSouClient:
         :param username: 用户名
         :param password: 密码
         :param auth_enabled: 是否启用认证
+        :param proxy: 代理地址，如 http://127.0.0.1:7890
         """
         self.base_url = base_url.rstrip("/") if base_url else ""
         self.username = username
@@ -53,6 +55,11 @@ class PanSouClient:
         self._token_expires: Optional[datetime] = None
         # API 调用计数器
         self._api_call_count = 0
+        # 代理设置（兼容字符串和字典格式）
+        if proxy:
+            self._proxies = proxy if isinstance(proxy, dict) else {"http": proxy, "https": proxy}
+        else:
+            self._proxies = None
 
     def _get_token(self) -> Optional[str]:
         """获取或刷新 Token"""
@@ -79,7 +86,8 @@ class PanSouClient:
             response = requests.post(
                 login_url,
                 json={"username": self.username, "password": self.password},
-                timeout=10
+                timeout=10,
+                proxies=self._proxies
             )
 
             if response.status_code == 200:
@@ -163,7 +171,7 @@ class PanSouClient:
 
             logger.info(f"PanSou 搜索: {payload}")
             self._api_call_count += 1
-            response = requests.post(search_url, json=payload, headers=headers, timeout=120)
+            response = requests.post(search_url, json=payload, headers=headers, timeout=120, proxies=self._proxies)
           
 
             # Token 失效重试
@@ -175,7 +183,7 @@ class PanSouClient:
                 if token:
                     headers["Authorization"] = f"Bearer {token}"
                     self._api_call_count += 1
-                    response = requests.post(search_url, json=payload, headers=headers, timeout=30)
+                    response = requests.post(search_url, json=payload, headers=headers, timeout=30, proxies=self._proxies)
 
             if response.status_code != 200:
                 return {

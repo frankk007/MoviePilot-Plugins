@@ -62,18 +62,17 @@ class UIConfig:
                         'content': [{
                             'component': 'VCol',
                             'props': {'cols': 12},
-                            'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '自动搜索115网盘资源并转存缺失的电影和剧集，需配置115 Cookie和搜索服务。'}}]
+                            'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '自动搜索115网盘资源并转存缺失的电影和剧集，需配置115 Cookie和搜索服务。避免风控，8小时运行一次，不可更改。'}}]
                         }]
                     },
                     # 基本开关 + 执行周期
                     {
                         'component': 'VRow',
                         'content': [
-                            {'component': 'VCol', 'props': {'cols': 6, 'md': 2}, 'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VCronField', 'props': {'model': 'cron', 'label': '执行周期', 'placeholder': 'cron表达式'}}]},
-                            {'component': 'VCol', 'props': {'cols': 6, 'md': 2}, 'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '发送通知'}}]},
-                            {'component': 'VCol', 'props': {'cols': 6, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'block_system_subscribe', 'label': '屏蔽系统订阅'}}]},
-                            {'component': 'VCol', 'props': {'cols': 6, 'md': 2}, 'content': [{'component': 'VSwitch', 'props': {'model': 'onlyonce', 'label': '立即运行'}}]}
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '发送通知'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'block_system_subscribe', 'label': '屏蔽系统订阅'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'onlyonce', 'label': '立即运行'}}]}
                             
                         ]
                     },

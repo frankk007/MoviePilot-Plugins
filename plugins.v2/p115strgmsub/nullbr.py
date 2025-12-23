@@ -14,12 +14,13 @@ class NullbrClient:
 
     BASE_URL = "https://api.nullbr.eu.org"
 
-    def __init__(self, app_id: str, api_key: str):
+    def __init__(self, app_id: str, api_key: str, proxy: str = None):
         """
         初始化 Nullbr 客户端
 
         :param app_id: Nullbr APP ID
         :param api_key: Nullbr API Key
+        :param proxy: 代理地址，如 http://127.0.0.1:7890
         """
         self.app_id = app_id
         self.api_key = api_key
@@ -31,6 +32,11 @@ class NullbrClient:
         }
         # API 调用计数器
         self._api_call_count = 0
+        # 代理设置（兼容字符串和字典格式）
+        if proxy:
+            self._proxies = proxy if isinstance(proxy, dict) else {"http": proxy, "https": proxy}
+        else:
+            self._proxies = None
 
     def get_movie_resources(self, tmdb_id: int) -> List[Dict[str, Any]]:
         """
@@ -55,7 +61,8 @@ class NullbrClient:
             response = requests.get(
                 url,
                 headers=self.headers,
-                timeout=30
+                timeout=30,
+                proxies=self._proxies
             )
 
             if response.status_code == 200:
@@ -109,7 +116,8 @@ class NullbrClient:
             response = requests.get(
                 url,
                 headers=self.headers,
-                timeout=30
+                timeout=30,
+                proxies=self._proxies
             )
 
             if response.status_code == 200:
@@ -174,7 +182,8 @@ class NullbrClient:
             response = requests.get(
                 url,
                 headers=self.headers,
-                timeout=10
+                timeout=10,
+                proxies=self._proxies
             )
 
             # 200 表示成功，404 表示未找到但连接正常
