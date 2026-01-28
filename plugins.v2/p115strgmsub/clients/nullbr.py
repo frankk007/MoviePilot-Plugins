@@ -157,6 +157,136 @@ class NullbrClient:
             logger.error(f"Nullbr 获取电视剧资源出错: {e}")
             return []
 
+    def get_movie_magnet_resources(self, tmdb_id: int) -> List[Dict[str, Any]]:
+        """
+        获取电影的磁力资源
+
+        :param tmdb_id: TMDB 电影 ID
+        :return: 资源列表
+        """
+        if not self.api_key or not self.app_id:
+            missing = []
+            if not self.app_id:
+                missing.append("APP ID")
+            if not self.api_key:
+                missing.append("API Key")
+            logger.error(f"Nullbr 缺少必要配置：{', '.join(missing)}，请在插件设置中配置")
+            return []
+
+        try:
+            url = f"{self.BASE_URL}/movie/{tmdb_id}/magnet"
+
+            self._api_call_count += 1
+            response = requests.get(
+                url,
+                headers=self.headers,
+                timeout=30,
+                proxies=self._proxies
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                resources = self._extract_resource_list(data)
+                if resources:
+                    logger.info(f"Nullbr 获取电影 {tmdb_id} 磁力资源成功，共 {len(resources)} 个")
+                    return resources
+                logger.info(f"Nullbr 未找到电影 {tmdb_id} 的磁力资源")
+                return []
+            if response.status_code == 401:
+                logger.error("Nullbr API Key 或 APP ID 无效或已过期")
+                return []
+            if response.status_code == 404:
+                logger.info(f"Nullbr 未找到电影 {tmdb_id} 的磁力资源")
+                return []
+            logger.warning(f"Nullbr 请求失败: HTTP {response.status_code}")
+            return []
+
+        except requests.exceptions.Timeout:
+            logger.error("Nullbr 请求超时")
+            return []
+        except Exception as e:
+            logger.error(f"Nullbr 获取电影磁力资源出错: {e}")
+            return []
+
+    def get_tv_magnet_resources(self, tmdb_id: int, season: int = None) -> List[Dict[str, Any]]:
+        """
+        获取电视剧的磁力资源
+
+        :param tmdb_id: TMDB 电视剧 ID
+        :param season: 季号（可选，用于过滤返回结果）
+        :return: 资源列表
+        """
+        if not self.api_key or not self.app_id:
+            missing = []
+            if not self.app_id:
+                missing.append("APP ID")
+            if not self.api_key:
+                missing.append("API Key")
+            logger.error(f"Nullbr 缺少必要配置：{', '.join(missing)}，请在插件设置中配置")
+            return []
+
+        try:
+            url = f"{self.BASE_URL}/tv/{tmdb_id}/magnet"
+
+            self._api_call_count += 1
+            response = requests.get(
+                url,
+                headers=self.headers,
+                timeout=30,
+                proxies=self._proxies
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                all_resources = self._extract_resource_list(data)
+
+                if not all_resources:
+                    logger.info(f"Nullbr 未找到电视剧 {tmdb_id} 的磁力资源")
+                    return []
+
+                if season:
+                    season_str = f"S{season}"
+                    filtered_resources = []
+                    for resource in all_resources:
+                        season_list = resource.get("season_list")
+                        if not season_list:
+                            filtered_resources.append(resource)
+                            continue
+                        if season_str in season_list:
+                            filtered_resources.append(resource)
+                    logger.info(f"Nullbr 获取电视剧 {tmdb_id} S{season} 磁力资源成功，共 {len(filtered_resources)} 个")
+                    return filtered_resources
+
+                logger.info(f"Nullbr 获取电视剧 {tmdb_id} 所有磁力资源成功，共 {len(all_resources)} 个")
+                return all_resources
+
+            if response.status_code == 401:
+                logger.error("Nullbr API Key 或 APP ID 无效或已过期")
+                return []
+            if response.status_code == 404:
+                logger.info(f"Nullbr 未找到电视剧 {tmdb_id} 的磁力资源")
+                return []
+            logger.warning(f"Nullbr 请求失败: HTTP {response.status_code}")
+            return []
+
+        except requests.exceptions.Timeout:
+            logger.error("Nullbr 请求超时")
+            return []
+        except Exception as e:
+            logger.error(f"Nullbr 获取电视剧磁力资源出错: {e}")
+            return []
+
+    @staticmethod
+    def _extract_resource_list(data: Any) -> List[Dict[str, Any]]:
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("magnet", "magnets", "ed2k", "bt", "resources", "list", "data", "115"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
     def check_connection(self) -> bool:
         """
         检查 API 连接状态

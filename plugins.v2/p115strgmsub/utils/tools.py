@@ -463,7 +463,15 @@ def convert_nullbr_to_pansou_format(nullbr_resources: List[Dict]) -> List[Dict]:
     converted = []
     for resource in nullbr_resources:
         share_link = resource.get("share_link", "") or resource.get("share_url", "")
-        magnet_link = resource.get("magnet") or resource.get("magnet_link") or resource.get("magnet_url", "")
+        magnet_link = (
+            resource.get("magnet")
+            or resource.get("magnet_link")
+            or resource.get("magnet_url")
+            or ""
+        )
+        link_value = resource.get("link")
+        if not magnet_link and isinstance(link_value, str) and link_value.startswith("magnet:"):
+            magnet_link = link_value
         url = share_link or magnet_link or ""
 
         converted.append({

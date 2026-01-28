@@ -194,9 +194,15 @@ class SearchHandler:
         if media_type == MediaType.MOVIE:
             logger.info(f"使用 Nullbr 查询电影资源: {mediainfo.title} (TMDB ID: {mediainfo.tmdb_id})")
             nullbr_resources = self._nullbr_client.get_movie_resources(mediainfo.tmdb_id)
+            if not nullbr_resources:
+                logger.info("Nullbr 未找到网盘资源，尝试磁力资源")
+                nullbr_resources = self._nullbr_client.get_movie_magnet_resources(mediainfo.tmdb_id)
         else:  # MediaType.TV
             logger.info(f"使用 Nullbr 查询电视剧资源: {mediainfo.title} S{season} (TMDB ID: {mediainfo.tmdb_id})")
             nullbr_resources = self._nullbr_client.get_tv_resources(mediainfo.tmdb_id, season)
+            if not nullbr_resources:
+                logger.info("Nullbr 未找到网盘资源，尝试磁力资源")
+                nullbr_resources = self._nullbr_client.get_tv_magnet_resources(mediainfo.tmdb_id, season)
 
         if nullbr_resources:
             results = convert_nullbr_to_pansou_format(nullbr_resources)
