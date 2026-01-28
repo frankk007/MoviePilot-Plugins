@@ -122,23 +122,35 @@ class NullbrClient:
                 data = response.json()
                 # 响应格式: {"115": [...], "id": 1396, "page": 1, "total_page": 1, "media_type": "tv"}
                 all_resources = data.get("115", [])
-                
+
                 if not all_resources:
                     logger.info(f"Nullbr 未找到电视剧 {tmdb_id} 的资源")
                     return []
-                
+
                 # 如果指定了季号，过滤包含该季的资源
                 if season:
                     season_str = f"S{season}"
                     filtered_resources = [
                         r for r in all_resources
-                        if season_str in r.get("season_list", [])
+                        if season_str in (r.get("season_list") or [])
                     ]
-                    logger.info(f"Nullbr 获取电视剧 {tmdb_id} S{season} 资源成功，共 {len(filtered_resources)} 个")
-                    return filtered_resources
-                else:
-                    logger.info(f"Nullbr 获取电视剧 {tmdb_id} 所有资源成功，共 {len(all_resources)} 个")
-                    return all_resources
+                    if filtered_resources:
+                        logger.info(f"Nullbr 获取电视剧 {tmdb_id} S{season} 资源成功，共 {len(filtered_resources)} 个")
+                        return filtered_resources
+
+                    magnet_resources = [
+                        r for r in all_resources
+                        if r.get("magnet") or r.get("magnet_link") or r.get("magnet_url")
+                    ]
+                    if magnet_resources:
+                        logger.info(f"Nullbr 未找到电视剧 {tmdb_id} S{season} 网盘分享资源，使用磁力资源 {len(magnet_resources)} 个")
+                        return magnet_resources
+
+                    logger.info(f"Nullbr 未找到电视剧 {tmdb_id} S{season} 的资源")
+                    return []
+
+                logger.info(f"Nullbr 获取电视剧 {tmdb_id} 所有资源成功，共 {len(all_resources)} 个")
+                return all_resources
                     
             elif response.status_code == 401:
                 logger.error("Nullbr API Key 或 APP ID 无效或已过期")
