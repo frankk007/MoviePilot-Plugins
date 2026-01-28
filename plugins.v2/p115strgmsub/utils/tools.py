@@ -454,7 +454,7 @@ def convert_nullbr_to_pansou_format(nullbr_resources: List[Dict]) -> List[Dict]:
     """
     将 Nullbr 资源格式转换为统一的资源格式
 
-    Nullbr 格式: {"title": "...", "share_link": "...", "size": "...", "resolution": "...", "season_list": [...]}
+    Nullbr 格式: {"title": "...", "share_link": "...", "size": "...", "resolution": "...", "season_list": [...], "magnet": "..."}
     统一格式: {"url": "...", "title": "...", "update_time": ""}
 
     :param nullbr_resources: Nullbr 返回的资源列表
@@ -462,10 +462,16 @@ def convert_nullbr_to_pansou_format(nullbr_resources: List[Dict]) -> List[Dict]:
     """
     converted = []
     for resource in nullbr_resources:
+        share_link = resource.get("share_link", "") or resource.get("share_url", "")
+        magnet_link = resource.get("magnet") or resource.get("magnet_link") or resource.get("magnet_url", "")
+        url = share_link or magnet_link or ""
+
         converted.append({
-            "url": resource.get("share_link", ""),
+            "url": url,
             "title": resource.get("title", ""),
-            "update_time": ""  # Nullbr 没有更新时间字段
+            "update_time": "",  # Nullbr 没有更新时间字段
+            "source": "nullbr",
+            "magnet_url": magnet_link
         })
     return converted
 

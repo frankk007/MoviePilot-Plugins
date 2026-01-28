@@ -3,11 +3,13 @@
 """
 import time
 import threading
+import re
 from pathlib import Path
 from functools import wraps
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple, Callable
 
+import requests
 from app.log import logger
 try:
     from p115client import P115Client, check_response
@@ -219,6 +221,7 @@ class P115ClientManager:
 
         # 分享信息缓存（URL -> {share_code, receive_code}）
         self._share_info_cache: Dict[str, Dict[str, str]] = {}
+        self._offline_session = requests.Session()
 
         if P115_AVAILABLE and cookies:
             try:
@@ -235,6 +238,199 @@ class P115ClientManager:
         """
         self.rate_limiter.wait()
         return func(*args, **kwargs)
+
+    def _parse_cookies(self) -> Dict[str, str]:
+        """将 Cookie 字符串解析为字典"""
+        cookies = {}
+        if not self.cookies:
+            return cookies
+        for part in self.cookies.split(";"):
+            if "=" in part:
+                key, value = part.strip().split("=", 1)
+                cookies[key] = value
+        return cookies
+
+    def _offline_request(
+        self,
+        action: str,
+        params: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+        method: str = "POST"
+    ) -> Optional[Dict[str, Any]]:
+        """调用 115 离线下载 API"""
+        if not self.cookies:
+            logger.error("115 Cookie 为空，无法调用离线下载接口")
+            return None
+
+        url = "https://webapi.115.com/lixian/"
+        req_params = {"ct": "lixian", "ac": action}
+        if params:
+            req_params.update(params)
+
+        try:
+            self.rate_limiter.wait()
+            self._api_call_count += 1
+            resp = self._offline_session.request(
+                method=method,
+                url=url,
+                params=req_params,
+                data=data,
+                headers={"User-Agent": self.user_agent},
+                cookies=self._parse_cookies(),
+                timeout=30
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"调用 115 离线接口失败 ({action}): {e}")
+            return None
+
+    @staticmethod
+    def extract_magnet_info_hash(magnet_url: str) -> str:
+        """从磁力链接中提取 info_hash"""
+        if not magnet_url:
+            return ""
+        match = re.search(r'xt=urn:btih:([a-fA-F0-9]+)', magnet_url)
+        return match.group(1).lower() if match else ""
+
+    @staticmethod
+    def _extract_task_id(task: Dict[str, Any]) -> str:
+        for key in ("task_id", "id", "taskid", "taskId"):
+            value = task.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    @staticmethod
+    def _extract_task_file_id(task: Dict[str, Any]) -> str:
+        for key in ("file_id", "fileid", "fid", "cid"):
+            value = task.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    @staticmethod
+    def _extract_task_name(task: Dict[str, Any]) -> str:
+        for key in ("name", "file_name", "filename", "title"):
+            value = task.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    @staticmethod
+    def is_offline_task_completed(task: Dict[str, Any]) -> bool:
+        """判断离线任务是否完成"""
+        status = task.get("status") or task.get("state") or task.get("status_code")
+        if isinstance(status, str) and status.isdigit():
+            status = int(status)
+        if status in (2, 3, 4):
+            return True
+        percent = task.get("percent") or task.get("progress")
+        try:
+            if isinstance(percent, str):
+                percent = percent.replace("%", "")
+            if percent is not None and float(percent) >= 100:
+                return True
+        except ValueError:
+            pass
+        return False
+
+    def list_offline_tasks(self) -> List[Dict[str, Any]]:
+        """获取离线任务列表"""
+        resp = self._offline_request("task_lists", params={"page": 1, "page_size": 200}, method="GET")
+        if not resp:
+            return []
+        data = resp.get("data") or resp.get("result") or resp
+        if isinstance(data, dict):
+            for key in ("list", "tasks", "task_list"):
+                tasks = data.get(key)
+                if isinstance(tasks, list):
+                    return tasks
+        if isinstance(data, list):
+            return data
+        return []
+
+    def add_magnet_task(self, magnet_url: str) -> Optional[Dict[str, Any]]:
+        """添加磁力离线任务"""
+        if not magnet_url:
+            return None
+        resp = self._offline_request("add_task_url", data={"url": magnet_url}, method="POST")
+        if not resp:
+            return None
+
+        if not resp.get("state") and resp.get("state") is not True:
+            error_msg = resp.get("error") or resp.get("message") or "未知错误"
+            logger.error(f"磁力任务添加失败: {error_msg}")
+            return None
+
+        task_info = None
+        data = resp.get("data") or resp.get("result") or resp.get("tasks")
+        if isinstance(data, list) and data:
+            task_info = data[0]
+        elif isinstance(data, dict):
+            task_info = data
+
+        if not task_info:
+            task_info = {}
+
+        return {
+            "task_id": self._extract_task_id(task_info),
+            "info_hash": self.extract_magnet_info_hash(magnet_url),
+            "name": self._extract_task_name(task_info),
+            "raw": task_info
+        }
+
+    def find_offline_task(self, task_id: str = "", info_hash: str = "") -> Optional[Dict[str, Any]]:
+        """查找离线任务详情"""
+        tasks = self.list_offline_tasks()
+        for task in tasks:
+            if task_id and self._extract_task_id(task) == str(task_id):
+                return task
+            if info_hash:
+                task_hash = (
+                    task.get("info_hash")
+                    or task.get("hash")
+                    or task.get("infohash")
+                    or ""
+                )
+                if task_hash and str(task_hash).lower() == info_hash.lower():
+                    return task
+        return None
+
+    def move_file(self, file_id: str, target_path: str) -> bool:
+        """移动文件或目录到目标路径"""
+        if not self.client:
+            return False
+        if not file_id:
+            logger.error("移动失败：file_id 为空")
+            return False
+        target_cid = self.get_pid_by_path(target_path, mkdir=True)
+        if target_cid == -1:
+            logger.error(f"移动失败：无法创建目标路径 {target_path}")
+            return False
+
+        move_methods = [
+            ("fs_move", [{"fid": file_id, "cid": target_cid}, {"file_ids": str(file_id), "cid": target_cid}]),
+            ("fs_move_app", [{"fid": file_id, "pid": target_cid}, {"file_ids": str(file_id), "pid": target_cid}])
+        ]
+
+        for method_name, payloads in move_methods:
+            method = getattr(self.client, method_name, None)
+            if not method:
+                continue
+            for payload in payloads:
+                try:
+                    self.rate_limiter.wait()
+                    self._api_call_count += 1
+                    resp = method(payload)
+                    check_response(resp)
+                    if resp.get("state"):
+                        logger.info(f"移动完成: {file_id} -> {target_path}")
+                        return True
+                except Exception as e:
+                    logger.debug(f"{method_name} 移动失败 ({payload}): {e}")
+        logger.error(f"移动失败：无法移动 {file_id} 到 {target_path}")
+        return False
 
     def check_login(self) -> bool:
         """检查登录状态"""

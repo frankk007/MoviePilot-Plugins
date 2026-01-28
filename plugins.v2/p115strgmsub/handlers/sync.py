@@ -3,7 +3,7 @@
 负责核心的同步逻辑：处理电影订阅、处理电视剧订阅
 """
 import datetime
-from typing import List, Dict, Any, Set, Optional, Callable
+from typing import List, Dict, Any, Set, Optional, Callable, Tuple
 
 from app.core.config import global_vars
 from app.core.metainfo import MetaInfo
@@ -70,6 +70,239 @@ class SyncHandler:
         self._post_message = post_message_func
         self._get_data = get_data_func
         self._save_data = save_data_func
+        self._magnet_task_key = "magnet_tasks"
+
+    def _load_magnet_tasks(self) -> List[Dict[str, Any]]:
+        if not self._get_data:
+            return []
+        tasks = self._get_data(self._magnet_task_key) or []
+        return tasks if isinstance(tasks, list) else []
+
+    def _save_magnet_tasks(self, tasks: List[Dict[str, Any]]):
+        if self._save_data:
+            self._save_data(self._magnet_task_key, tasks)
+
+    @staticmethod
+    def _is_magnet_url(url: str) -> bool:
+        return bool(url and url.startswith("magnet:"))
+
+    def _find_pending_task(
+        self,
+        tasks: List[Dict[str, Any]],
+        subscribe_id: int,
+        media_type: str,
+        season: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
+        for task in tasks:
+            if task.get("subscribe_id") != subscribe_id:
+                continue
+            if task.get("media_type") != media_type:
+                continue
+            if media_type == "tv" and task.get("season") != season:
+                continue
+            return task
+        return None
+
+    def _process_pending_magnet_movie(
+        self,
+        subscribe,
+        mediainfo: MediaInfo,
+        history: List[dict],
+        transfer_details: List[Dict[str, Any]],
+        transferred_count: int
+    ) -> Tuple[int, bool]:
+        tasks = self._load_magnet_tasks()
+        task = self._find_pending_task(tasks, subscribe.id, "movie")
+        if not task:
+            return transferred_count, False
+
+        offline_task = self._p115_manager.find_offline_task(
+            task_id=task.get("task_id", ""),
+            info_hash=task.get("info_hash", "")
+        )
+        if not offline_task:
+            logger.info(f"磁力任务未完成：{task.get('title')}，等待离线完成")
+            return transferred_count, True
+
+        if not self._p115_manager.is_offline_task_completed(offline_task):
+            logger.info(f"磁力任务未完成：{task.get('title')}，等待离线完成")
+            return transferred_count, True
+
+        file_id = self._p115_manager._extract_task_file_id(offline_task)
+        if not file_id:
+            logger.warning(f"磁力任务已完成但未找到文件ID：{task.get('title')}")
+            return transferred_count, True
+
+        save_dir = task.get("save_dir")
+        if not save_dir:
+            save_dir = f"{self._movie_save_path}/{mediainfo.title} ({mediainfo.year})" if mediainfo.year else f"{self._movie_save_path}/{mediainfo.title}"
+
+        if not self._p115_manager.move_file(file_id, save_dir):
+            return transferred_count, True
+
+        file_name = self._p115_manager._extract_task_name(offline_task) or task.get("resource_title", "")
+        history_item = {
+            "title": mediainfo.title,
+            "year": mediainfo.year,
+            "type": "电影",
+            "status": "成功",
+            "share_url": task.get("magnet_url", ""),
+            "file_name": file_name,
+            "filter_score": 0,
+            "perfect_match": True,
+            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        history.append(history_item)
+
+        transfer_details.append({
+            "type": "电影",
+            "title": mediainfo.title,
+            "year": mediainfo.year,
+            "image": mediainfo.get_poster_image(),
+            "file_name": file_name
+        })
+
+        try:
+            DownloadHistoryOper().add(
+                path=save_dir,
+                type=mediainfo.type.value,
+                title=mediainfo.title,
+                year=mediainfo.year,
+                tmdbid=mediainfo.tmdb_id,
+                imdbid=mediainfo.imdb_id,
+                tvdbid=mediainfo.tvdb_id,
+                doubanid=mediainfo.douban_id,
+                image=mediainfo.get_poster_image(),
+                downloader="115网盘",
+                download_hash=task.get("info_hash") or task.get("task_id") or task.get("magnet_url"),
+                torrent_name=task.get("resource_title") or file_name,
+                torrent_description=file_name,
+                torrent_site="115网盘",
+                username="P115StrgmSub",
+                date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                note={"source": f"Subscribe|{subscribe.name}", "magnet_url": task.get("magnet_url")}
+            )
+            logger.debug(f"已记录电影 {mediainfo.title} 磁力下载历史")
+        except Exception as e:
+            logger.warning(f"记录下载历史失败：{e}")
+
+        self._subscribe_handler.check_and_finish_subscribe(
+            subscribe=subscribe,
+            mediainfo=mediainfo,
+            success_episodes=[1]
+        )
+
+        tasks = [t for t in tasks if t is not task]
+        self._save_magnet_tasks(tasks)
+        transferred_count += 1
+        return transferred_count, True
+
+    def _process_pending_magnet_tv(
+        self,
+        subscribe,
+        mediainfo: MediaInfo,
+        season: int,
+        missing_episodes: List[int],
+        history: List[dict],
+        transfer_details: List[Dict[str, Any]],
+        transferred_count: int
+    ) -> Tuple[int, bool]:
+        tasks = self._load_magnet_tasks()
+        task = self._find_pending_task(tasks, subscribe.id, "tv", season)
+        if not task:
+            return transferred_count, False
+
+        offline_task = self._p115_manager.find_offline_task(
+            task_id=task.get("task_id", ""),
+            info_hash=task.get("info_hash", "")
+        )
+        if not offline_task:
+            logger.info(f"磁力任务未完成：{task.get('title')} S{season}")
+            return transferred_count, True
+
+        if not self._p115_manager.is_offline_task_completed(offline_task):
+            logger.info(f"磁力任务未完成：{task.get('title')} S{season}")
+            return transferred_count, True
+
+        file_id = self._p115_manager._extract_task_file_id(offline_task)
+        if not file_id:
+            logger.warning(f"磁力任务已完成但未找到文件ID：{task.get('title')} S{season}")
+            return transferred_count, True
+
+        show_folder = f"{mediainfo.title} ({mediainfo.year})" if mediainfo.year else mediainfo.title
+        save_dir = task.get("save_dir") or f"{self._save_path}/{show_folder}/Season {season}"
+
+        if not self._p115_manager.move_file(file_id, save_dir):
+            return transferred_count, True
+
+        existing_episodes = FileMatcher.check_existing_episodes(
+            self._p115_manager, mediainfo, season, save_dir
+        )
+        expected_episodes = set(task.get("episodes") or missing_episodes)
+        success_episodes = sorted(existing_episodes & expected_episodes)
+
+        for episode in success_episodes:
+            history_item = {
+                "title": mediainfo.title,
+                "season": season,
+                "episode": episode,
+                "type": "电视剧",
+                "status": "成功",
+                "share_url": task.get("magnet_url", ""),
+                "file_name": task.get("resource_title", ""),
+                "filter_score": 0,
+                "perfect_match": True,
+                "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            history.append(history_item)
+
+        if success_episodes:
+            transferred_count += len(success_episodes)
+
+            transfer_details.append({
+                "type": "电视剧",
+                "title": mediainfo.title,
+                "year": mediainfo.year,
+                "season": season,
+                "episodes": success_episodes,
+                "image": mediainfo.get_poster_image()
+            })
+
+            try:
+                episodes_str = StringUtils.format_ep(success_episodes)
+                DownloadHistoryOper().add(
+                    path=save_dir,
+                    type=mediainfo.type.value,
+                    title=mediainfo.title,
+                    year=mediainfo.year,
+                    tmdbid=mediainfo.tmdb_id,
+                    imdbid=mediainfo.imdb_id,
+                    tvdbid=mediainfo.tvdb_id,
+                    doubanid=mediainfo.douban_id,
+                    seasons=f"S{season:02d}",
+                    episodes=episodes_str,
+                    image=mediainfo.get_poster_image(),
+                    downloader="115网盘",
+                    download_hash=task.get("info_hash") or task.get("task_id") or task.get("magnet_url"),
+                    torrent_name=task.get("resource_title") or task.get("title"),
+                    torrent_site="115网盘",
+                    username="P115StrgmSub",
+                    date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    note={"source": f"Subscribe|{subscribe.name}", "magnet_url": task.get("magnet_url")}
+                )
+                logger.debug(f"已记录 {mediainfo.title} S{season:02d} 磁力下载历史")
+            except Exception as e:
+                logger.warning(f"记录下载历史失败：{e}")
+
+            self._subscribe_handler.check_and_finish_subscribe(
+                subscribe=subscribe,
+                mediainfo=mediainfo,
+                success_episodes=success_episodes
+            )
+
+        tasks = [t for t in tasks if t is not task]
+        self._save_magnet_tasks(tasks)
+        return transferred_count, True
 
     def process_movie_subscribe(
         self,
@@ -130,6 +363,17 @@ class SyncHandler:
                 logger.warn(f"无法识别媒体信息：{subscribe.name}")
                 return transferred_count
 
+            transferred_count, handled_pending = self._process_pending_magnet_movie(
+                subscribe=subscribe,
+                mediainfo=mediainfo,
+                history=history,
+                transfer_details=transfer_details,
+                transferred_count=transferred_count
+            )
+            if handled_pending:
+                logger.info(f"{mediainfo.title} 存在磁力离线任务，等待完成后再处理")
+                return transferred_count
+
             # 搜索网盘资源
             p115_results = self._search_handler.search_resources(
                 mediainfo=mediainfo,
@@ -168,6 +412,32 @@ class SyncHandler:
                 logger.info(f"检查分享：{resource_title} - {share_url}")
 
                 try:
+                    magnet_url = resource.get("magnet_url") or ""
+                    if resource.get("source") == "nullbr" and (magnet_url or self._is_magnet_url(share_url)):
+                        magnet_target = magnet_url or share_url
+                        task_info = self._p115_manager.add_magnet_task(magnet_target)
+                        if not task_info:
+                            logger.error(f"磁力任务添加失败：{resource_title}")
+                            continue
+
+                        magnet_tasks = self._load_magnet_tasks()
+                        if not self._find_pending_task(magnet_tasks, subscribe.id, "movie"):
+                            magnet_tasks.append({
+                                "task_id": task_info.get("task_id"),
+                                "info_hash": task_info.get("info_hash"),
+                                "magnet_url": magnet_target,
+                                "resource_title": resource_title,
+                                "title": mediainfo.title,
+                                "year": mediainfo.year,
+                                "media_type": "movie",
+                                "subscribe_id": subscribe.id,
+                                "save_dir": f"{self._movie_save_path}/{mediainfo.title} ({mediainfo.year})" if mediainfo.year else f"{self._movie_save_path}/{mediainfo.title}",
+                                "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            })
+                            self._save_magnet_tasks(magnet_tasks)
+                        logger.info(f"已提交磁力离线任务：{resource_title}，等待完成后转存")
+                        return transferred_count
+
                     # 先检查分享链接是否有效
                     share_status = self._p115_manager.check_share_status(share_url)
                     if not share_status.is_valid:
@@ -445,6 +715,19 @@ class SyncHandler:
                     )
                 return transferred_count
 
+            transferred_count, handled_pending = self._process_pending_magnet_tv(
+                subscribe=subscribe,
+                mediainfo=mediainfo,
+                season=season,
+                missing_episodes=missing_episodes,
+                history=history,
+                transfer_details=transfer_details,
+                transferred_count=transferred_count
+            )
+            if handled_pending:
+                logger.info(f"{mediainfo.title_year} S{season} 存在磁力离线任务，等待完成后再处理")
+                return transferred_count
+
             logger.info(f"{mediainfo.title_year} S{season} 待转存剧集：{missing_episodes}")
 
             # 创建订阅过滤条件
@@ -512,6 +795,35 @@ class SyncHandler:
                     logger.info(f"检查分享：{resource_title} - {share_url}")
 
                     try:
+                        magnet_url = resource.get("magnet_url") or ""
+                        if resource.get("source") == "nullbr" and (magnet_url or self._is_magnet_url(share_url)):
+                            magnet_target = magnet_url or share_url
+                            task_info = self._p115_manager.add_magnet_task(magnet_target)
+                            if not task_info:
+                                logger.error(f"磁力任务添加失败：{resource_title}")
+                                continue
+
+                            magnet_tasks = self._load_magnet_tasks()
+                            if not self._find_pending_task(magnet_tasks, subscribe.id, "tv", season):
+                                show_folder = f"{mediainfo.title} ({mediainfo.year})" if mediainfo.year else mediainfo.title
+                                magnet_tasks.append({
+                                    "task_id": task_info.get("task_id"),
+                                    "info_hash": task_info.get("info_hash"),
+                                    "magnet_url": magnet_target,
+                                    "resource_title": resource_title,
+                                    "title": mediainfo.title,
+                                    "year": mediainfo.year,
+                                    "media_type": "tv",
+                                    "season": season,
+                                    "episodes": missing_episodes,
+                                    "subscribe_id": subscribe.id,
+                                    "save_dir": f"{self._save_path}/{show_folder}/Season {season}",
+                                    "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                })
+                                self._save_magnet_tasks(magnet_tasks)
+                            logger.info(f"已提交磁力离线任务：{resource_title}，等待完成后转存")
+                            return transferred_count
+
                         # 检查分享链接是否有效
                         share_status = self._p115_manager.check_share_status(share_url)
                         if not share_status.is_valid:
