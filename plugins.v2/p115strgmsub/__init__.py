@@ -44,7 +44,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.2.7"
+    plugin_version = "1.2.8"
     # 插件作者
     plugin_author = "mrtian2016"
     # 作者主页
@@ -916,7 +916,7 @@ class P115StrgmSub(_PluginBase):
                 )
             return False
 
-        logger.info("开始执行 115 网盘订阅增强同步...")
+        logger.info("开始执行 115 网盘订阅同步...")
         if self._notify:
             self.post_message(
                 mtype=NotificationType.Plugin,
@@ -996,7 +996,7 @@ class P115StrgmSub(_PluginBase):
 
         self.save_data('history', history[-500:])
 
-        logger.info(f"115 网盘订阅增强同步完成，共转存 {transferred_count} 个文件")
+        logger.info(f"115 网盘订阅同步完成，共转存 {transferred_count} 个文件")
 
         if self._notify:
             if transferred_count > 0:

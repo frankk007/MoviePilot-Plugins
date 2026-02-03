@@ -137,9 +137,7 @@ class SearchHandler:
             return self._search_hdhive(mediainfo, media_type, season)
         elif source == "pansou":
             if media_type == MediaType.MOVIE:
-                search_keyword = f"{mediainfo.title} {mediainfo.year}" if mediainfo.year else mediainfo.title
-                logger.info(f"使用 PanSou 搜索电影资源: {mediainfo.title}")
-                return self._pansou_search(search_keyword)
+                return self._search_pansou_movie(mediainfo)
             else:
                 return self._search_pansou_tv(mediainfo, season)
         else:
@@ -204,6 +202,39 @@ class SearchHandler:
             return results
 
         logger.info(f"Nullbr 未找到资源")
+        return []
+
+    def _search_pansou_movie(
+        self,
+        mediainfo: MediaInfo,
+    ) -> List[Dict]:
+        """
+        仅使用 PanSou 搜索电视剧资源（带降级关键词策略）
+
+        :param mediainfo: 媒体信息
+        :param season: 季号
+        :return: 115网盘资源列表
+        """
+        if not self._pansou_client:
+            logger.warning(f"PanSou 客户端未初始化，跳过 PanSou 查询")
+            return []
+
+        # 电视剧使用降级搜索策略
+        search_keywords = [
+            f"{mediainfo.title} {mediainfo.year}",
+            mediainfo.title
+        ]
+
+        for keyword in search_keywords:
+            logger.info(f"使用 PanSou 搜索电影资源: {mediainfo.title}，关键词: '{keyword}'")
+            results = self._pansou_search(keyword)
+            if results:
+                logger.info(f"PanSou 关键词 '{keyword}' 搜索到 {len(results)} 个结果")
+                return results
+            else:
+                logger.info(f"PanSou 关键词 '{keyword}' 无结果，尝试下一个降级关键词")
+
+        logger.info(f"PanSou 未找到资源")
         return []
 
     def _search_pansou_tv(
