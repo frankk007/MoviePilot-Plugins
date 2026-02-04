@@ -168,16 +168,17 @@ class SubscribeHandler:
 
     @staticmethod
     def _guess_sites_storage_format_for_subscribe(db, subscribe_id: int) -> str:
-        row = db.execute(
-            text("SELECT sites FROM subscribe WHERE id=:id LIMIT 1"),
-            {"id": int(subscribe_id)}
-        ).fetchone()
-        if not row:
+        """
+        通过 SubscribeOper 获取订阅对象来判断 sites 字段存储格式
+        使用 ORM 层可以正确处理 SQLite 中 JSON 字段的类型转换
+        """
+        subscribe = SubscribeOper(db=db).get(int(subscribe_id))
+        if not subscribe:
             return "list"
-        v = row[0]
-        if isinstance(v, str):
+        sites = getattr(subscribe, "sites", None)
+        if isinstance(sites, str):
             return "str"
-        if isinstance(v, list):
+        if isinstance(sites, list):
             return "list"
         return "list"
 
